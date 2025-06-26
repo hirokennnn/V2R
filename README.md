@@ -2,12 +2,12 @@
 
 This repository contains codes and data for the following paper:   
 > Mathematical Framework to Identify Optimal Molecule based on Virtual Ligand Strategy.
-> Wataru Matsuoka, Ken Hirose, Ren Yamada, Taihei Oki, Satoru Iwata, Satoshi Maeda, _ChemRxiv_ **2025**, 
-> DOI: ([10.26434/chemrxiv-2025-0snj5](https://chemrxiv.org/engage/chemrxiv/article-details/67d8c3fa6dde43c90830259a))  
+> Wataru Matsuoka, Ken Hirose, Ren Yamada, Taihei Oki, Satoru Iwata, Satoshi Maeda, _J. Chem. Inf. Model._ **2025**, 
+> DOI: ([10.1021/acs.jcim.5c00815](https://pubs.acs.org/doi/10.1021/acs.jcim.5c00815))  
 
 If codes and/or data in this repository are used in your work, please cite the following papers:
 > _ACS Catal._ **2024**, _14_, 16297.  
-> _ChemRxiv_ **2025**, DOI: 10.26434/chemrxiv-2025-0snj5. 
+> _J. Chem. Inf. Model._ **2025**, DOI: 10.1021/acs.jcim.5c00815. 
 
 It consists of three main components:
 - VL : python programs to calculate the penarty, gradient and Hessian for the virtual ligand method
