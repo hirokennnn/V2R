@@ -206,7 +206,21 @@ def VL_param_hess(xyz, param, param_tag, MM_param_list, path_phi_log, linkjob, c
     tensor_list = torch.tensor(tensor_list, dtype=torch.float64)
 
     ddV_vl_dqdq =  torch.func.jacrev(torch.func.jacrev(calc_all_penarty, argnums=1), argnums=1)(xyz, phi_list, MM_param_list, param_tag, tensor_list, tensor_tag, tensor_flag)
-    ddV_vl_dqdq_inv = torch.linalg.inv(ddV_vl_dqdq)
+
+    # ddV_vl_dqdq_inv = torch.linalg.inv(ddV_vl_dqdq)
+    ddV_vl_dqdq = 0.5 * (ddV_vl_dqdq + ddV_vl_dqdq.T)     # hessian の対称化
+    eig_val_q, eig_vec_q = torch.linalg.eigh(ddV_vl_dqdq) # eig と比べ、対称行列で使うと高速になる。（三角行列のみ参照する。）
+
+    eig_atol_q = 1.0e-12 # 絶対的に 10^−12 以下の小さな値or 最大固有値と比べて 10^−10 以下の小さな値をゼロと見なす固有値の閾値を設定
+    eig_rtol_q = 1.0e-10
+    eig_scale_q = torch.max(torch.abs(eig_val_q)).item()
+    eig_tol_q = max(eig_atol_q, eig_rtol_q * eig_scale_q)
+
+    stable_mask_q = torch.abs(eig_val_q) > eig_tol_q # ほぼゼロの固有値を除外
+    eig_val_q_keep = eig_val_q[stable_mask_q]
+    eig_vec_q_keep = eig_vec_q[:, stable_mask_q]
+    ddV_vl_dqdq_inv = (eig_vec_q_keep / eig_val_q_keep.unsqueeze(0)) @ eig_vec_q_keep.T # Moore-Penrose疑似逆行列を構築(unsqueeze(0):行列の形を計算にある形に整える。)
+
     ddV_vl_dqdp = torch.func.jacrev(torch.func.jacrev(calc_all_penarty, argnums=1), argnums=4)(xyz, phi_list, MM_param_list, param_tag, tensor_list, tensor_tag, tensor_flag)
     dq_dp = -1 * ddV_vl_dqdq_inv @ ddV_vl_dqdp
 
@@ -227,14 +241,58 @@ def VL_param_hess(xyz, param, param_tag, MM_param_list, path_phi_log, linkjob, c
 
     dq_dQ = -1 * ddV_vl_dqdq_inv @ ddV_vl_dqdQ
     tmp_mat_1 = ddE_dQdQ + ddV_vl_dqdQ.T @ dq_dQ
+    tmp_mat_1 = 0.5 * (tmp_mat_1 + tmp_mat_1.T) # 対称行列にする
     tmp_mat_2 = ddV_vl_dpdQ.T + ddV_vl_dqdQ.T @ dq_dp
 
-    eig_val, eig_vec = torch.linalg.eig(tmp_mat_1)
-    eig_val = eig_val[:-6]
-    eig_mat_inv = torch.eye((len(eig_val))) / eig_val
-    eig_vec = eig_vec.T[:-6].T
+    # eig_val, eig_vec = torch.linalg.eig(tmp_mat_1)
+    # eig_val = eig_val[:-6]
+    # eig_mat_inv = torch.eye((len(eig_val))) / eig_val
+    # eig_vec = eig_vec.T[:-6].T
+    """
+    Frozen原子がある場合、残る剛体回転の数をFrozen原子の配置から判定する。
+       固定なし                 ：6 つの自由度を除く。
+       1原子固定                ：固定原子を中心とする回転3自由度を除く。
+       2原子固定 or 3原子が直線状：固定原子の配置が同一直線上なら、その軸まわりの回転1自由度のみを除く。
+       3原子以上固定            ：固有値を除かない。
+    """
+    eig_val, eig_vec = torch.linalg.eigh(tmp_mat_1) # 対称行列なら、eigh が適切.
 
-    tmp_mat_1_inv = (eig_vec @ eig_mat_inv @ eig_vec.T).double()
+    # 剛体モードの数を判定
+    if comfile.tag_frozen:
+        frozen_coord = np.array([atom_info[1] for atom_info in comfile.frozen_xyz], dtype=float)
+        if len(frozen_coord) == 1:
+            n_rigid_mode = 3
+        else:
+            frozen_relative = frozen_coord[1:] - frozen_coord[0]
+            frozen_rank = np.linalg.matrix_rank(frozen_relative, tol=1.0e-10)
+            if frozen_rank == 0:
+                n_rigid_mode = 3
+            elif frozen_rank == 1:
+                n_rigid_mode = 1
+            else:
+                n_rigid_mode = 0
+    else:
+        n_rigid_mode = 6
+
+    keep_mask = torch.ones_like(eig_val, dtype=torch.bool) # eig_valと同じ形状を持ち、すべての要素がTrue
+
+    # 既知の並進・回転モードを除く
+    if n_rigid_mode > 0:
+        remove_idx = torch.argsort(torch.abs(eig_val))[:n_rigid_mode]
+        keep_mask[remove_idx] = False
+        removed_eig_val = eig_val[remove_idx].detach().cpu().numpy()
+    
+    # 剛体モード以外でも、閾値以下の固有値は疑似逆行列で0として扱う -> Moore-Penrose疑似逆行列として安定
+    eig_atol = 1.0e-12
+    eig_rtol = 1.0e-10
+    eig_scale = torch.max(torch.abs(eig_val)).item()
+    eig_tol = max(eig_atol, eig_rtol * eig_scale)
+    stable_mask = keep_mask & (torch.abs(eig_val) > eig_tol)
+    eig_val_keep = eig_val[stable_mask]
+    eig_vec_keep = eig_vec[:, stable_mask]
+    tmp_mat_1_inv = (eig_vec_keep / eig_val_keep.unsqueeze(0)) @ eig_vec_keep.T
+
+    # tmp_mat_1_inv = (eig_vec @ eig_mat_inv @ eig_vec.T).double()
     dQ_dp = -1 * tmp_mat_1_inv @ tmp_mat_2
     ddE_dpdp = ddV_vl_dpdQ @ dQ_dp + ddV_vl_dpdp + ddV_vl_dqdp.T @ (dq_dQ @ dQ_dp + dq_dp)
 
@@ -249,5 +307,6 @@ def VL_param_hess(xyz, param, param_tag, MM_param_list, path_phi_log, linkjob, c
     mat_unit_conv = np.array(mat_unit_conv)
     ddE_dpdp_unit = ddE_dpdp * mat_unit_conv
     np.savetxt(param.path + '_hess', ddE_dpdp_unit, delimiter=",")
+
 
 
